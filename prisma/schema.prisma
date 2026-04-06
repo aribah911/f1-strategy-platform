@@ -1,13 +1,51 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider  = "postgresql"
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  predictions  Prediction[]
+}
+
+model Prediction {
+  id                      String   @id @default(cuid())
+  userId                  String
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name                    String?
+  meetingKey              Int
+  sessionKey              Int?
+  year                    Int?
+  trackName               String
+  circuitKey              Int?
+  sessionType             String
+
+  tireCompound            String
+  trackCondition          String
+  weatherMode             String
+  weatherPreset           String?
+
+  airTemperature          Float?
+  trackTemperature        Float?
+  humidity                Float?
+  rainfall                Float?
+  windSpeed               Float?
+
+  predictedLapTimeSeconds Float
+  predictedLapTimeLow     Float
+  predictedLapTimeHigh    Float
+
+  explanation             String
+  modelVersion            String
+
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 }
