@@ -15,6 +15,7 @@
     "@mui/material-nextjs": "^7.3.9",
     "@prisma/client": "^7.6.0",
     "bcrypt": "^6.0.0",
+    "jose": "^6.2.2",
     "next": "16.2.2",
     "prisma": "^7.6.0",
     "react": "19.2.4",
