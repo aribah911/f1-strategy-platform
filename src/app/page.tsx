@@ -10,6 +10,7 @@ import {
 } from "@mui/material";
 import { getCurrentUser } from "@/lib/auth";
 import LogoutButton from "@/components/auth/LogoutButton";
+import PredictionBuilder from "@/components/landing/PredictionBuilder";
 
 export default async function HomePage() {
   const user = await getCurrentUser();
@@ -25,9 +26,14 @@ export default async function HomePage() {
           <Stack direction="row" spacing={2} alignItems="center">
             {user ? (
               <>
+                <Typography variant="body2" sx={{ color: "white", opacity: 0.85 }}>
+                  {user.email}
+                </Typography>
+
                 <Button component={Link} href="/dashboard" color="inherit">
                   Dashboard
                 </Button>
+
                 <LogoutButton />
               </>
             ) : (
@@ -44,19 +50,20 @@ export default async function HomePage() {
         </Toolbar>
       </AppBar>
 
-      <Container maxWidth="md" sx={{ py: 10 }}>
-        <Stack spacing={3}>
-          <Typography variant="h3" fontWeight={700}>
-            Build and test F1 lap strategies
-          </Typography>
+      <Container maxWidth="lg" sx={{ py: 8 }}>
+        <Stack spacing={6}>
+          <Stack spacing={2} sx={{ maxWidth: 760 }}>
+            <Typography variant="h3" fontWeight={700}>
+              Build and test F1 lap predictions
+            </Typography>
 
-          <Typography variant="h6" sx={{ color: "grey.400" }}>
-            Build a simple F1 lap prediction using historical OpenF1 data.
-          </Typography>
+            <Typography variant="h6" sx={{ color: "grey.400" }}>
+              Use historical race data to understand how season, tyre choice,
+              weather, and track conditions can impact lap time.
+            </Typography>
+          </Stack>
 
-          <Button variant="contained" sx={{ width: "fit-content" }}>
-            Start Building
-          </Button>
+          <PredictionBuilder />
         </Stack>
       </Container>
     </Box>
