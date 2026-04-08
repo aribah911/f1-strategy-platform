@@ -63,7 +63,7 @@ export default async function HomePage() {
             </Typography>
           </Stack>
 
-          <PredictionBuilder />
+          <PredictionBuilder  isLoggedIn={!!user} />
         </Stack>
       </Container>
     </Box>

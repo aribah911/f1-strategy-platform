@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Box,
+  Alert,
   Button,
   MenuItem,
   Paper,
@@ -21,21 +21,30 @@ import type {
   WeatherPreset,
 } from "@/types/prediction";
 
+type PredictionBuilderProps = {
+  isLoggedIn: boolean;
+};
+
 type TrackOption = {
   meetingKey: number;
-  meetingName: string;
   trackName: string;
-  circuitKey: number;
-  countryName: string;
-  year: number;
   label: string;
+  circuitKey: number;
 };
 
 type SessionOption = {
   sessionKey: number;
-  meetingKey: number;
-  sessionName: string;
   sessionType: SessionType;
+};
+
+const DEFAULT_FORM: PredictLapRequest = {
+  season: 2025,
+  meetingKey: 0,
+  sessionType: "Qualifying",
+  tireCompound: "SOFT",
+  trackCondition: "DRY",
+  weatherMode: "PRESET",
+  weatherPreset: "NORMAL",
 };
 
 const SEASON_OPTIONS: Season[] = [2023, 2024, 2025, 2026];
@@ -55,25 +64,30 @@ const WEATHER_PRESET_OPTIONS: WeatherPreset[] = [
   "WET",
 ];
 
-const DEFAULT_FORM: PredictLapRequest = {
-  season: 2025,
-  meetingKey: 0,
-  sessionType: "Qualifying",
-  tireCompound: "SOFT",
-  trackCondition: "DRY",
-  weatherMode: "PRESET",
-  weatherPreset: "NORMAL",
-};
+export default function PredictionBuilder({
+  isLoggedIn,
+}: PredictionBuilderProps) {
+  const [mounted, setMounted] = useState(false);
 
-export default function PredictionBuilder() {
   const [form, setForm] = useState<PredictLapRequest>(DEFAULT_FORM);
   const [tracks, setTracks] = useState<TrackOption[]>([]);
   const [sessions, setSessions] = useState<SessionOption[]>([]);
   const [result, setResult] = useState<PredictLapResponse | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [tracksLoading, setTracksLoading] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+
   const [error, setError] = useState("");
+
+  const [saveLabel, setSaveLabel] = useState("");
+  const [saveMessage, setSaveMessage] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [saveLoading, setSaveLoading] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   function updateField<K extends keyof PredictLapRequest>(
     key: K,
@@ -82,50 +96,20 @@ export default function PredictionBuilder() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function validateForm() {
-    if (!form.meetingKey) return "Please select a track.";
-    if (!form.sessionType) return "Please select a session.";
-    if (!form.tireCompound) return "Please select a tire compound.";
-    if (!form.trackCondition) return "Please select a track condition.";
-
-    if (form.weatherMode === "PRESET" && !form.weatherPreset) {
-      return "Please select a weather preset.";
-    }
-
-    if (form.weatherMode === "MANUAL") {
-      const values = [
-        form.airTemperature,
-        form.trackTemperature,
-        form.humidity,
-        form.rainfall,
-        form.windSpeed,
-      ];
-
-      if (values.some((value) => value === undefined || Number.isNaN(value))) {
-        return "Please fill out all manual weather fields.";
-      }
-    }
-
-    return "";
-  }
-
   useEffect(() => {
     async function loadTracks() {
       setTracksLoading(true);
       setError("");
-      setTracks([]);
-      setSessions([]);
 
       try {
-        const response = await fetch(`/api/tracks?season=${form.season}`);
-        const json = await response.json();
+        const res = await fetch(`/api/tracks?season=${form.season}`);
+        const json = await res.json();
 
-        if (!response.ok) {
+        if (!res.ok) {
           throw new Error(json.error || "Failed to load tracks.");
         }
 
         setTracks(json);
-
         setForm((prev) => ({
           ...prev,
           meetingKey: json[0]?.meetingKey ?? 0,
@@ -149,32 +133,27 @@ export default function PredictionBuilder() {
 
       setSessionsLoading(true);
       setError("");
-      setSessions([]);
 
       try {
-        const response = await fetch(
-          `/api/sessions?meetingKey=${form.meetingKey}`
-        );
-        const json = await response.json();
+        const res = await fetch(`/api/sessions?meetingKey=${form.meetingKey}`);
+        const json = await res.json();
 
-        if (!response.ok) {
+        if (!res.ok) {
           throw new Error(json.error || "Failed to load sessions.");
         }
 
         setSessions(json);
 
-        const uniqueSessionTypes = [
-          ...new Set(
-            json.map((session: SessionOption) => session.sessionType)
-          ),
+        const types = [
+          ...new Set(json.map((s: SessionOption) => s.sessionType)),
         ] as SessionType[];
 
-        if (!uniqueSessionTypes.includes(form.sessionType)) {
-          setForm((prev) => ({
-            ...prev,
-            sessionType: uniqueSessionTypes[0] ?? "Qualifying",
-          }));
-        }
+        setForm((prev) => ({
+          ...prev,
+          sessionType: types.includes(prev.sessionType)
+            ? prev.sessionType
+            : types[0] ?? prev.sessionType,
+        }));
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Failed to load sessions."
@@ -185,41 +164,32 @@ export default function PredictionBuilder() {
     }
 
     loadSessions();
-  }, [form.meetingKey, form.sessionType]);
+  }, [form.meetingKey]);
 
-  const availableTracks = useMemo(() => tracks, [tracks]);
+  const availableSessions = useMemo(
+    () => [...new Set(sessions.map((s) => s.sessionType))] as SessionType[],
+    [sessions]
+  );
 
-  const availableSessions = useMemo(() => {
-    return [
-      ...new Set(sessions.map((session) => session.sessionType)),
-    ] as SessionType[];
-  }, [sessions]);
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-
-    const validationError = validateForm();
-    if (validationError) {
-      setError(validationError);
-      return;
-    }
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
 
     setLoading(true);
-    setError("");
     setResult(null);
+    setError("");
+    setSaveMessage("");
+    setSaveError("");
 
     try {
-      const response = await fetch("/api/predict", {
+      const res = await fetch("/api/predict", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify(form),
+        headers: { "Content-Type": "application/json" },
       });
 
-      const json = await response.json();
+      const json = await res.json();
 
-      if (!response.ok) {
+      if (!res.ok) {
         throw new Error(json.error || "Prediction failed.");
       }
 
@@ -231,236 +201,336 @@ export default function PredictionBuilder() {
     }
   }
 
-  return (
-    <Box component="form" onSubmit={handleSubmit}>
-      <Paper sx={{ p: 3 }}>
-        <Stack spacing={2}>
-          <Typography variant="h6">Build Prediction</Typography>
+  async function handleSave() {
+    if (!isLoggedIn) {
+      setSaveError("You must be logged in.");
+      return;
+    }
 
-          <TextField
-            label="Season"
-            value={form.season}
-            onChange={(e) =>
-              updateField("season", Number(e.target.value) as Season)
-            }
-            select
-            fullWidth
-          >
-            {SEASON_OPTIONS.map((season) => (
-              <MenuItem key={season} value={season}>
-                {season}
-              </MenuItem>
-            ))}
-          </TextField>
+    if (!result) return;
 
-          <TextField
-            label="Track"
-            value={tracks.length > 0 && form.meetingKey ? form.meetingKey : ""}
-            onChange={(e) =>
-              updateField("meetingKey", Number(e.target.value))
-            }
-            select
-            fullWidth
-          >
-            {availableTracks.length > 0 ? (
-              availableTracks.map((track) => (
-                <MenuItem key={track.meetingKey} value={track.meetingKey}>
-                  {track.label}
-                </MenuItem>
-              ))
-            ) : (
-              <MenuItem value="" disabled>
-                {tracksLoading ? "Loading tracks..." : "No tracks available"}
-              </MenuItem>
-            )}
-          </TextField>
+    const track = tracks.find((t) => t.meetingKey === form.meetingKey);
 
-          <TextField
-            label="Session"
-            value={
-              availableSessions.includes(form.sessionType)
-                ? form.sessionType
-                : ""
-            }
-            onChange={(e) =>
-              updateField("sessionType", e.target.value as SessionType)
-            }
-            select
-            fullWidth
-          >
-            {availableSessions.length > 0 ? (
-              availableSessions.map((sessionType) => (
-                <MenuItem key={sessionType} value={sessionType}>
-                  {sessionType}
-                </MenuItem>
-              ))
-            ) : (
-              <MenuItem value="" disabled>
-                {sessionsLoading ? "Loading sessions..." : "No sessions available"}
-              </MenuItem>
-            )}
-          </TextField>
+    setSaveLoading(true);
+    setSaveMessage("");
+    setSaveError("");
 
-          <TextField
-            label="Tire Compound"
-            value={form.tireCompound}
-            onChange={(e) =>
-              updateField("tireCompound", e.target.value as TireCompound)
-            }
-            select
-            fullWidth
-          >
-            {TIRE_OPTIONS.map((tire) => (
-              <MenuItem key={tire} value={tire}>
-                {tire}
-              </MenuItem>
-            ))}
-          </TextField>
+    try {
+      const res = await fetch("/api/predictions", {
+        method: "POST",
+        body: JSON.stringify({
+          name: saveLabel.trim() || null,
+          meetingKey: form.meetingKey,
+          sessionKey: result.metadata.sessionKey ?? null,
+          year: form.season,
+          trackName: track?.trackName ?? track?.label ?? "Unknown",
+          circuitKey: track?.circuitKey ?? null,
+          sessionType: form.sessionType,
+          tireCompound: form.tireCompound,
+          trackCondition: form.trackCondition,
+          weatherMode: form.weatherMode,
+          weatherPreset: form.weatherPreset ?? null,
+          airTemperature: form.airTemperature ?? null,
+          trackTemperature: form.trackTemperature ?? null,
+          humidity: form.humidity ?? null,
+          rainfall: form.rainfall ?? null,
+          windSpeed: form.windSpeed ?? null,
+          predictedLapTimeSeconds: result.predictedLapTimeSeconds,
+          predictedLapTimeLow: result.lowSeconds,
+          predictedLapTimeHigh: result.highSeconds,
+          explanation: result.explanation,
+          modelVersion: result.metadata.modelVersion,
+        }),
+        headers: { "Content-Type": "application/json" },
+      });
 
-          <TextField
-            label="Track Condition"
-            value={form.trackCondition}
-            onChange={(e) =>
-              updateField("trackCondition", e.target.value as TrackCondition)
-            }
-            select
-            fullWidth
-          >
-            {TRACK_CONDITION_OPTIONS.map((condition) => (
-              <MenuItem key={condition} value={condition}>
-                {condition}
-              </MenuItem>
-            ))}
-          </TextField>
+      const json = await res.json();
 
-          <TextField
-            label="Weather Mode"
-            value={form.weatherMode}
-            onChange={(e) =>
-              updateField("weatherMode", e.target.value as WeatherMode)
-            }
-            select
-            fullWidth
-          >
-            {WEATHER_MODE_OPTIONS.map((mode) => (
-              <MenuItem key={mode} value={mode}>
-                {mode}
-              </MenuItem>
-            ))}
-          </TextField>
+      if (!res.ok) {
+        throw new Error(json.error || "Failed to save prediction.");
+      }
 
-          {form.weatherMode === "PRESET" && (
-            <TextField
-              label="Weather Preset"
-              value={form.weatherPreset ?? ""}
-              onChange={(e) =>
-                updateField("weatherPreset", e.target.value as WeatherPreset)
-              }
-              select
-              fullWidth
-            >
-              {WEATHER_PRESET_OPTIONS.map((preset) => (
-                <MenuItem key={preset} value={preset}>
-                  {preset}
-                </MenuItem>
-              ))}
-            </TextField>
-          )}
+      setSaveMessage("Prediction saved.");
+      setSaveLabel("");
+    } catch (err) {
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to save prediction."
+      );
+    } finally {
+      setSaveLoading(false);
+    }
+  }
 
-          {form.weatherMode === "MANUAL" && (
-            <>
-              <TextField
-                label="Air Temperature"
-                type="number"
-                value={form.airTemperature ?? ""}
-                onChange={(e) =>
-                  updateField(
-                    "airTemperature",
-                    e.target.value === "" ? undefined : Number(e.target.value)
-                  )
-                }
-                fullWidth
-              />
-
-              <TextField
-                label="Track Temperature"
-                type="number"
-                value={form.trackTemperature ?? ""}
-                onChange={(e) =>
-                  updateField(
-                    "trackTemperature",
-                    e.target.value === "" ? undefined : Number(e.target.value)
-                  )
-                }
-                fullWidth
-              />
-
-              <TextField
-                label="Humidity"
-                type="number"
-                value={form.humidity ?? ""}
-                onChange={(e) =>
-                  updateField(
-                    "humidity",
-                    e.target.value === "" ? undefined : Number(e.target.value)
-                  )
-                }
-                fullWidth
-              />
-
-              <TextField
-                label="Rainfall"
-                type="number"
-                value={form.rainfall ?? ""}
-                onChange={(e) =>
-                  updateField(
-                    "rainfall",
-                    e.target.value === "" ? undefined : Number(e.target.value)
-                  )
-                }
-                fullWidth
-              />
-
-              <TextField
-                label="Wind Speed"
-                type="number"
-                value={form.windSpeed ?? ""}
-                onChange={(e) =>
-                  updateField(
-                    "windSpeed",
-                    e.target.value === "" ? undefined : Number(e.target.value)
-                  )
-                }
-                fullWidth
-              />
-            </>
-          )}
-
-          {error ? <Typography color="error">{error}</Typography> : null}
-
-          <Button type="submit" variant="contained" disabled={loading}>
-            {loading ? "Running..." : "Run Prediction"}
-          </Button>
-        </Stack>
+  if (!mounted) {
+    return (
+      <Paper sx={{ p: 4 }}>
+        <Typography variant="h5" fontWeight={700}>
+          Build Prediction
+        </Typography>
       </Paper>
+    );
+  }
 
-      {result ? (
-        <Paper sx={{ mt: 3, p: 2 }}>
-          <Stack spacing={1}>
-            <Typography variant="h6">Prediction Result</Typography>
-            <Typography>
-              Predicted Lap: {result.predictedLapTimeFormatted}
-            </Typography>
-            <Typography>
-              Range: {result.lowFormatted} - {result.highFormatted}
-            </Typography>
-            <Typography>
-              Sample Laps: {result.metadata.sampleLapCount}
-            </Typography>
-            <Typography>Explanation: {result.explanation}</Typography>
-          </Stack>
-        </Paper>
-      ) : null}
-    </Box>
+  return (
+    <Paper sx={{ p: 4 }}>
+      <Stack component="form" spacing={3} onSubmit={handleSubmit}>
+        <Typography variant="h5" fontWeight={700}>
+          Build Prediction
+        </Typography>
+
+        <TextField
+          label="Season"
+          value={form.season}
+          onChange={(e) =>
+            updateField("season", Number(e.target.value) as Season)
+          }
+          select
+          fullWidth
+        >
+          {SEASON_OPTIONS.map((season) => (
+            <MenuItem key={season} value={season}>
+              {season}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        <TextField
+          label="Track"
+          value={form.meetingKey}
+          onChange={(e) => updateField("meetingKey", Number(e.target.value))}
+          select
+          fullWidth
+          disabled={tracksLoading || tracks.length === 0}
+        >
+          {tracks.length > 0 ? (
+            tracks.map((track) => (
+              <MenuItem key={track.meetingKey} value={track.meetingKey}>
+                {track.label}
+              </MenuItem>
+            ))
+          ) : (
+            <MenuItem value={0}>
+              {tracksLoading ? "Loading tracks..." : "No tracks available"}
+            </MenuItem>
+          )}
+        </TextField>
+
+        <TextField
+          label="Session Type"
+          value={form.sessionType}
+          onChange={(e) =>
+            updateField("sessionType", e.target.value as SessionType)
+          }
+          select
+          fullWidth
+          disabled={sessionsLoading || availableSessions.length === 0}
+        >
+          {availableSessions.length > 0 ? (
+            availableSessions.map((sessionType) => (
+              <MenuItem key={sessionType} value={sessionType}>
+                {sessionType}
+              </MenuItem>
+            ))
+          ) : (
+            <MenuItem value="">
+              {sessionsLoading ? "Loading sessions..." : "No sessions available"}
+            </MenuItem>
+          )}
+        </TextField>
+
+        <TextField
+          label="Tire Compound"
+          value={form.tireCompound}
+          onChange={(e) =>
+            updateField("tireCompound", e.target.value as TireCompound)
+          }
+          select
+          fullWidth
+        >
+          {TIRE_OPTIONS.map((tire) => (
+            <MenuItem key={tire} value={tire}>
+              {tire}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        <TextField
+          label="Track Condition"
+          value={form.trackCondition}
+          onChange={(e) =>
+            updateField("trackCondition", e.target.value as TrackCondition)
+          }
+          select
+          fullWidth
+        >
+          {TRACK_CONDITION_OPTIONS.map((condition) => (
+            <MenuItem key={condition} value={condition}>
+              {condition}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        <TextField
+          label="Weather Mode"
+          value={form.weatherMode}
+          onChange={(e) =>
+            updateField("weatherMode", e.target.value as WeatherMode)
+          }
+          select
+          fullWidth
+        >
+          {WEATHER_MODE_OPTIONS.map((mode) => (
+            <MenuItem key={mode} value={mode}>
+              {mode}
+            </MenuItem>
+          ))}
+        </TextField>
+
+        {form.weatherMode === "PRESET" && (
+          <TextField
+            label="Weather Preset"
+            value={form.weatherPreset ?? ""}
+            onChange={(e) =>
+              updateField("weatherPreset", e.target.value as WeatherPreset)
+            }
+            select
+            fullWidth
+          >
+            {WEATHER_PRESET_OPTIONS.map((preset) => (
+              <MenuItem key={preset} value={preset}>
+                {preset}
+              </MenuItem>
+            ))}
+          </TextField>
+        )}
+
+        {form.weatherMode === "MANUAL" && (
+          <>
+            <TextField
+              label="Air Temperature"
+              type="number"
+              value={form.airTemperature ?? ""}
+              onChange={(e) =>
+                updateField(
+                  "airTemperature",
+                  e.target.value === "" ? undefined : Number(e.target.value)
+                )
+              }
+              fullWidth
+            />
+
+            <TextField
+              label="Track Temperature"
+              type="number"
+              value={form.trackTemperature ?? ""}
+              onChange={(e) =>
+                updateField(
+                  "trackTemperature",
+                  e.target.value === "" ? undefined : Number(e.target.value)
+                )
+              }
+              fullWidth
+            />
+
+            <TextField
+              label="Humidity"
+              type="number"
+              value={form.humidity ?? ""}
+              onChange={(e) =>
+                updateField(
+                  "humidity",
+                  e.target.value === "" ? undefined : Number(e.target.value)
+                )
+              }
+              fullWidth
+            />
+
+            <TextField
+              label="Rainfall"
+              type="number"
+              value={form.rainfall ?? ""}
+              onChange={(e) =>
+                updateField(
+                  "rainfall",
+                  e.target.value === "" ? undefined : Number(e.target.value)
+                )
+              }
+              fullWidth
+            />
+
+            <TextField
+              label="Wind Speed"
+              type="number"
+              value={form.windSpeed ?? ""}
+              onChange={(e) =>
+                updateField(
+                  "windSpeed",
+                  e.target.value === "" ? undefined : Number(e.target.value)
+                )
+              }
+              fullWidth
+            />
+          </>
+        )}
+
+        {error ? <Alert severity="error">{error}</Alert> : null}
+
+        <Button type="submit" variant="contained" disabled={loading}>
+          {loading ? "Running..." : "Run Prediction"}
+        </Button>
+
+        {result ? (
+          <Paper variant="outlined" sx={{ p: 3 }}>
+            <Stack spacing={2}>
+              <Typography variant="h6" fontWeight={700}>
+                Prediction Result
+              </Typography>
+
+              <Typography>
+                <strong>Predicted Lap:</strong> {result.predictedLapTimeFormatted}
+              </Typography>
+
+              <Typography>
+                <strong>Range:</strong> {result.lowFormatted} - {result.highFormatted}
+              </Typography>
+
+              <Typography>
+                <strong>Sample Laps:</strong> {result.metadata.sampleLapCount}
+              </Typography>
+
+              <Typography>
+                <strong>Explanation:</strong> {result.explanation}
+              </Typography>
+
+              {isLoggedIn ? (
+                <>
+                  <TextField
+                    label="Label"
+                    value={saveLabel}
+                    onChange={(e) => setSaveLabel(e.target.value)}
+                    fullWidth
+                  />
+
+                  <Button
+                    variant="contained"
+                    onClick={handleSave}
+                    disabled={saveLoading}
+                  >
+                    {saveLoading ? "Saving..." : "Save Prediction"}
+                  </Button>
+                </>
+              ) : (
+                <Alert severity="info">
+                  Log in to save predictions.
+                </Alert>
+              )}
+
+              {saveMessage ? <Alert severity="success">{saveMessage}</Alert> : null}
+              {saveError ? <Alert severity="error">{saveError}</Alert> : null}
+            </Stack>
+          </Paper>
+        ) : null}
+      </Stack>
+    </Paper>
   );
 }
