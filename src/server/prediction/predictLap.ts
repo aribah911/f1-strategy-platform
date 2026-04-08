@@ -14,6 +14,13 @@ type JoinedLap = {
   compound: TireCompound | null;
 };
 
+type CompoundSelectionResult = {
+  candidateLaps: JoinedLap[];
+  compoundAdjustment: number;
+  fallbackExplanation: string;
+  sourceCompound: TireCompound | null;
+};
+
 function getRegulationBucket(season: number): RegulationBucket {
   return season >= 2026 ? "REG_2026_PLUS" : "REG_2023_2025";
 }
@@ -78,10 +85,9 @@ function assignCompoundToLap(
 function cleanAndJoinLaps(
   laps: OpenF1Lap[],
   stints: OpenF1Stint[],
-  sessionType: SessionType,
-  tireCompound: TireCompound
+  sessionType: SessionType
 ): JoinedLap[] {
-  let baseLaps = laps
+  const baseLaps = laps
     .filter((lap) => lap.lap_duration != null)
     .filter((lap) => lap.is_pit_out_lap !== true)
     .map((lap) => ({
@@ -91,18 +97,18 @@ function cleanAndJoinLaps(
       compound: assignCompoundToLap(lap, stints),
     }));
 
-//   baseLaps = baseLaps.filter((lap) => lap.compound === tireCompound);
-
   if (baseLaps.length === 0) {
     return [];
   }
 
+  // For qualifying, bias toward the faster representative push-lap cluster.
   if (sessionType === "Qualifying") {
     const fastestLap = Math.min(...baseLaps.map((lap) => lap.lapDuration));
 
     return baseLaps.filter((lap) => lap.lapDuration <= fastestLap + 5);
   }
 
+  // For race, keep a broader median-based band.
   const durations = baseLaps.map((lap) => lap.lapDuration);
   const sessionMedian = median(durations);
 
@@ -118,11 +124,21 @@ function cleanAndJoinLaps(
 }
 
 function getWeatherMedians(weather: OpenF1Weather[]) {
-  const air = weather.map((w) => w.air_temperature).filter((v): v is number => v != null);
-  const track = weather.map((w) => w.track_temperature).filter((v): v is number => v != null);
-  const humidity = weather.map((w) => w.humidity).filter((v): v is number => v != null);
-  const rainfall = weather.map((w) => w.rainfall).filter((v): v is number => v != null);
-  const wind = weather.map((w) => w.wind_speed).filter((v): v is number => v != null);
+  const air = weather
+    .map((w) => w.air_temperature)
+    .filter((v): v is number => v != null);
+  const track = weather
+    .map((w) => w.track_temperature)
+    .filter((v): v is number => v != null);
+  const humidity = weather
+    .map((w) => w.humidity)
+    .filter((v): v is number => v != null);
+  const rainfall = weather
+    .map((w) => w.rainfall)
+    .filter((v): v is number => v != null);
+  const wind = weather
+    .map((w) => w.wind_speed)
+    .filter((v): v is number => v != null);
 
   return {
     airTemperature: median(air) ?? 0,
@@ -171,7 +187,9 @@ function getPresetWeatherValues(preset: PredictLapRequest["weatherPreset"]) {
   }
 }
 
-function getTrackConditionPenalty(trackCondition: PredictLapRequest["trackCondition"]) {
+function getTrackConditionPenalty(
+  trackCondition: PredictLapRequest["trackCondition"]
+) {
   switch (trackCondition) {
     case "COOL":
       return -0.12;
@@ -195,7 +213,8 @@ function getWeatherAdjustment(
     input.weatherMode === "MANUAL"
       ? {
           airTemperature: input.airTemperature ?? historical.airTemperature,
-          trackTemperature: input.trackTemperature ?? historical.trackTemperature,
+          trackTemperature:
+            input.trackTemperature ?? historical.trackTemperature,
           humidity: input.humidity ?? historical.humidity,
           rainfall: input.rainfall ?? historical.rainfall,
           windSpeed: input.windSpeed ?? historical.windSpeed,
@@ -221,6 +240,64 @@ function getWeatherAdjustment(
   return adjustment;
 }
 
+function selectCompoundSample(
+  joinedLaps: JoinedLap[],
+  targetCompound: TireCompound,
+  minSample: number
+): CompoundSelectionResult {
+  const grouped: Record<TireCompound, JoinedLap[]> = {
+    SOFT: joinedLaps.filter((lap) => lap.compound === "SOFT"),
+    MEDIUM: joinedLaps.filter((lap) => lap.compound === "MEDIUM"),
+    HARD: joinedLaps.filter((lap) => lap.compound === "HARD"),
+  };
+
+  if (grouped[targetCompound].length >= minSample) {
+    return {
+      candidateLaps: grouped[targetCompound],
+      compoundAdjustment: 0,
+      fallbackExplanation: "",
+      sourceCompound: targetCompound,
+    };
+  }
+
+  const fallbackOrder: Record<
+    TireCompound,
+    Array<{ compound: TireCompound; adjustment: number }>
+  > = {
+    SOFT: [
+      { compound: "MEDIUM", adjustment: -0.6 },
+      { compound: "HARD", adjustment: -1.4 },
+    ],
+    MEDIUM: [
+      { compound: "SOFT", adjustment: 0.6 },
+      { compound: "HARD", adjustment: -0.8 },
+    ],
+    HARD: [
+      { compound: "MEDIUM", adjustment: 0.9 },
+      { compound: "SOFT", adjustment: 1.4 },
+    ],
+  };
+
+  for (const option of fallbackOrder[targetCompound]) {
+    if (grouped[option.compound].length >= minSample) {
+      return {
+        candidateLaps: grouped[option.compound],
+        compoundAdjustment: option.adjustment,
+        fallbackExplanation: `Limited ${targetCompound.toLowerCase()}-tyre data was available, so the estimate used ${option.compound.toLowerCase()}-tyre laps with a ${targetCompound.toLowerCase()}-tyre adjustment.`,
+        sourceCompound: option.compound,
+      };
+    }
+  }
+
+  return {
+    candidateLaps: joinedLaps,
+    compoundAdjustment: 0,
+    fallbackExplanation:
+      "Limited compound-specific data was available, so the estimate used a broader cleaned session sample.",
+    sourceCompound: null,
+  };
+}
+
 export function buildPrediction(params: {
   input: PredictLapRequest;
   sessionKey: number;
@@ -230,75 +307,20 @@ export function buildPrediction(params: {
 }): PredictLapResponse {
   const { input, sessionKey, laps, stints, weather } = params;
 
-//   console.log("RAW LAPS COUNT:", laps.length);
+  const joinedLaps = cleanAndJoinLaps(laps, stints, input.sessionType);
 
-//   console.log(
-//     "RAW LAP SAMPLE:",
-//     laps.slice(0, 10).map((lap) => ({
-//       driver: lap.driver_number,
-//       lap: lap.lap_number,
-//       duration: lap.lap_duration,
-//       pitOut: lap.is_pit_out_lap,
-//     }))
-//   );
+  const {
+    candidateLaps,
+    compoundAdjustment,
+    fallbackExplanation,
+    sourceCompound,
+  } = selectCompoundSample(joinedLaps, input.tireCompound, 5);
 
-//   console.log("RAW STINTS SAMPLE:", stints.slice(0, 50));
-
-  const joinedLaps = cleanAndJoinLaps(
-    laps, 
-    stints, 
-    input.sessionType, 
-    input.tireCompound
-  );
-
-  console.log("CLEANED LAPS COUNT:", joinedLaps.length);
-
-  console.log(
-    "CLEANED LAP SAMPLE:",
-    joinedLaps.slice(0, 10)
-  );
-
-  const compoundCounts = joinedLaps.reduce((acc, lap) => {
-  acc[lap.compound ?? "UNKNOWN"] =
-    (acc[lap.compound ?? "UNKNOWN"] || 0) + 1;
-  return acc;
-}, {} as Record<string, number>);
-
-console.log("COMPOUND COUNTS:", compoundCounts);
-
-  const compoundLaps = joinedLaps.filter(
-    (lap) => lap.compound === input.tireCompound
-  );
-
-  console.log(
-  "SELECTED COMPOUND:",
-  input.tireCompound
-);
-
-console.log(
-  "COMPOUND LAPS COUNT:",
-  compoundLaps.length
-);
-
-console.log(
-  "COMPOUND LAP TIMES:",
-  compoundLaps.map((lap) => lap.lapDuration)
-);
-
-  const candidateLaps = compoundLaps.length > 0 ? compoundLaps : joinedLaps;
   const lapDurations = candidateLaps.map((lap) => lap.lapDuration);
-
-  console.log(
-  "USING COMPOUND LAPS?",
-  compoundLaps.length > 0
-);
-
-console.log(
-  "FINAL SAMPLE SIZE:",
-  candidateLaps.length
-);
-
   const base = median(lapDurations);
+
+  console.log("Candidate laps:", candidateLaps.length);
+  console.log("Sample lap durations:", candidateLaps.map((lap) => lap.lapDuration));
 
   if (base == null) {
     throw new Error("Not enough valid lap data to generate prediction.");
@@ -308,23 +330,54 @@ console.log(
   const weatherAdjustment = getWeatherAdjustment(input, historicalWeather);
   const trackConditionPenalty = getTrackConditionPenalty(input.trackCondition);
 
-  const predicted = base + weatherAdjustment + trackConditionPenalty;
-  const low = percentile(lapDurations, 0.2) ?? predicted - 0.35;
-  const high = percentile(lapDurations, 0.8) ?? predicted + 0.35;
+  const predicted =
+    base + compoundAdjustment + weatherAdjustment + trackConditionPenalty;
+
+  const lowBase = percentile(lapDurations, 0.2) ?? base - 0.35;
+  const highBase = percentile(lapDurations, 0.8) ?? base + 0.35;
+
+  const low =
+    lowBase + compoundAdjustment + weatherAdjustment + trackConditionPenalty;
+  const high =
+    highBase + compoundAdjustment + weatherAdjustment + trackConditionPenalty;
 
   const explanationParts = [
-    `Baseline comes from historical ${input.sessionType.toLowerCase()} laps for this meeting on ${input.tireCompound.toLowerCase()} tyres.`,
+    `Baseline comes from historical ${input.sessionType.toLowerCase()} laps for this meeting using ${input.tireCompound.toLowerCase()}-tyre modeling.`,
   ];
+
+  if (fallbackExplanation) {
+    explanationParts.push(fallbackExplanation);
+  }
+
+  if (sourceCompound && sourceCompound !== input.tireCompound) {
+    explanationParts.push(
+      `The sampled baseline came from ${sourceCompound.toLowerCase()}-tyre laps because the selected tyre had limited coverage.`
+    );
+  }
+
+  if (compoundAdjustment !== 0) {
+    explanationParts.push(
+      `A compound adjustment of ${
+        compoundAdjustment >= 0 ? "+" : ""
+      }${compoundAdjustment.toFixed(2)}s was applied.`
+    );
+  }
 
   if (Math.abs(weatherAdjustment) > 0.05) {
     explanationParts.push(
-      `Weather inputs changed the estimate by ${weatherAdjustment >= 0 ? "+" : ""}${weatherAdjustment.toFixed(2)}s versus the session median weather.`
+      `Weather inputs changed the estimate by ${
+        weatherAdjustment >= 0 ? "+" : ""
+      }${weatherAdjustment.toFixed(
+        2
+      )}s versus the session median weather.`
     );
   }
 
   if (trackConditionPenalty !== 0) {
     explanationParts.push(
-      `${input.trackCondition} track conditions added ${trackConditionPenalty >= 0 ? "+" : ""}${trackConditionPenalty.toFixed(2)}s.`
+      `${input.trackCondition} track conditions added ${
+        trackConditionPenalty >= 0 ? "+" : ""
+      }${trackConditionPenalty.toFixed(2)}s.`
     );
   }
 
